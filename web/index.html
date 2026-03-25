@@ -1,86 +1,212 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Collaborative Editor</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        textarea { width: 100%; height: 300px; font-family: monospace; }
-        #status { margin-top: 10px; color: green; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Collaborative Editor + Merge Benchmark</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; margin: 20px; color: #1f2937; }
+    h1 { margin: 0 0 8px; }
+    .muted { color: #6b7280; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+    textarea { width: 100%; height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    input, select, button { padding: 6px 8px; border-radius: 6px; border: 1px solid #d1d5db; }
+    button { cursor: pointer; background: #111827; color: #fff; }
+    button.secondary { background: #fff; color: #111827; }
+    #status { font-size: 13px; color: #059669; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; font-size: 13px; }
+    th { background: #f9fafb; }
+  </style>
 </head>
 <body>
-    <h1>Collaborative Text Editor</h1>
-    <textarea id="editor" placeholder="Start typing..."></textarea>
-    <div id="status">Connecting...</div>
+  <h1>协同编辑实验台</h1>
+  <div class="muted">支持多用户协同（可在本页模拟多个用户）+ 比较不同合并算法指标。</div>
 
-    <script>
-        const editor = document.getElementById('editor');
-        const status = document.getElementById('status');
-        const ws = new WebSocket('ws://localhost:8080');
+  <div class="grid">
+    <div class="card">
+      <h3>实时协同编辑</h3>
+      <textarea id="editor" placeholder="开始输入，打开多个标签页或者用下方 Bot 进行模拟"></textarea>
+      <div class="row">
+        <label>Bot 用户数：<input id="botCount" type="number" min="0" max="20" value="3" /></label>
+        <label>每秒操作：<input id="botRate" type="number" min="1" max="20" value="3" /></label>
+        <button id="startBots">启动 Bot</button>
+        <button id="stopBots" class="secondary">停止 Bot</button>
+      </div>
+      <div id="status">Connecting...</div>
+    </div>
 
-        let lastText = '';
-        let localChange = false;
+    <div class="card">
+      <h3>合并算法指标对比</h3>
+      <div class="row">
+        <label>Clients <input id="benchClients" type="number" min="2" max="50" value="6" /></label>
+        <label>Ops/Client <input id="benchOps" type="number" min="10" max="2000" value="120" /></label>
+        <label>Delay(ms) <input id="benchDelay" type="number" min="0" max="200" value="10" /></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" class="algo" value="plain" checked /> plain</label>
+        <label><input type="checkbox" class="algo" value="rga" checked /> rga</label>
+        <label><input type="checkbox" class="algo" value="ot" checked /> ot</label>
+        <label><input type="checkbox" class="algo" value="json" checked /> json</label>
+        <label><input type="checkbox" class="algo" value="egwalker" /> egwalker</label>
+        <label><input type="checkbox" class="algo" value="egwalker-ref" /> egwalker-ref</label>
+      </div>
+      <button id="runBench">运行 Benchmark</button>
+      <div id="benchStatus" class="muted"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Algorithm</th>
+            <th>Time Taken To Load and Merge Changes (ms)</th>
+            <th>Ram Usage (bytes)</th>
+            <th>Storage Size (bytes)</th>
+            <th>Converged</th>
+          </tr>
+        </thead>
+        <tbody id="benchBody"></tbody>
+      </table>
+    </div>
+  </div>
 
-        function computeDiff(oldText, newText) {
-            let start = 0;
-            while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
-                start++;
-            }
+  <script>
+    const editor = document.getElementById('editor');
+    const status = document.getElementById('status');
+    const ws = new WebSocket(`ws://${location.host}`);
 
-            let oldEnd = oldText.length - 1;
-            let newEnd = newText.length - 1;
-            while (oldEnd >= start && newEnd >= start && oldText[oldEnd] === newText[newEnd]) {
-                oldEnd--;
-                newEnd--;
-            }
+    let lastText = '';
+    let localChange = false;
+    let botTimers = [];
+    let botSockets = [];
 
-            const removed = oldText.slice(start, oldEnd + 1);
-            const inserted = newText.slice(start, newEnd + 1);
-            return { from: start, to: oldEnd + 1, insert: inserted };
+    function computeDiff(oldText, newText) {
+      let start = 0;
+      while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) start++;
+
+      let oldEnd = oldText.length - 1;
+      let newEnd = newText.length - 1;
+      while (oldEnd >= start && newEnd >= start && oldText[oldEnd] === newText[newEnd]) {
+        oldEnd--; newEnd--;
+      }
+
+      return { from: start, to: oldEnd + 1, insert: newText.slice(start, newEnd + 1) };
+    }
+
+    ws.onopen = () => { status.textContent = 'Connected'; };
+    ws.onclose = () => { status.textContent = 'Disconnected'; };
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'init') {
+        lastText = msg.state.text || '';
+        editor.value = lastText;
+        return;
+      }
+      if (msg.type === 'op') {
+        const packet = msg.op || {};
+        if (typeof packet.text === 'string') {
+          lastText = packet.text;
+        } else if (packet.op && packet.op.type === 'edit') {
+          const o = packet.op;
+          lastText = lastText.slice(0, o.from) + (o.insert || '') + lastText.slice(o.to);
+        } else if (packet.type === 'edit') {
+          const o = packet;
+          lastText = lastText.slice(0, o.from) + (o.insert || '') + lastText.slice(o.to);
         }
+        if (!localChange) editor.value = lastText;
+      }
+      localChange = false;
+    };
 
-        ws.onopen = () => {
-            status.textContent = 'Connected';
+    editor.addEventListener('input', () => {
+      const current = editor.value;
+      const diff = computeDiff(lastText, current);
+      ws.send(JSON.stringify({ type: 'edit', op: diff }));
+      lastText = current;
+      localChange = true;
+    });
+
+    function stopBots() {
+      for (const t of botTimers) clearInterval(t);
+      botTimers = [];
+      for (const s of botSockets) {
+        try { s.close(); } catch (_) {}
+      }
+      botSockets = [];
+    }
+
+    function startBots() {
+      stopBots();
+      const n = Math.max(0, Number(document.getElementById('botCount').value || 0));
+      const rate = Math.max(1, Number(document.getElementById('botRate').value || 1));
+      const interval = Math.max(60, Math.round(1000 / rate));
+      for (let i = 0; i < n; i++) {
+        const s = new WebSocket(`ws://${location.host}`);
+        botSockets.push(s);
+        let botText = '';
+        s.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'init') botText = msg.state.text || '';
+          if (msg.type === 'op' && msg.op?.text !== undefined) botText = msg.op.text;
         };
-
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'init') {
-                lastText = msg.state.text || '';
-                editor.value = lastText;
-            } else if (msg.type === 'op') {
-                if (msg.text !== undefined) {
-                    // Apply merged text from server
-                    lastText = msg.text;
-                    if (!localChange) {
-                        editor.value = lastText;
-                    }
-                } else if (msg.op && msg.op.type === 'edit') {
-                    const from = msg.op.from;
-                    const to = msg.op.to;
-                    const insert = msg.op.insert || '';
-                    lastText = lastText.slice(0, from) + insert + lastText.slice(to);
-                    if (!localChange) {
-                        editor.value = lastText;
-                    }
-                }
-            }
-            localChange = false;
+        s.onopen = () => {
+          const timer = setInterval(() => {
+            const pos = botText.length;
+            const ch = String.fromCharCode(97 + Math.floor(Math.random() * 26));
+            s.send(JSON.stringify({ type: 'edit', op: { from: pos, to: pos, insert: ch } }));
+            botText += ch;
+          }, interval + Math.floor(Math.random() * 40));
+          botTimers.push(timer);
         };
+      }
+      status.textContent = `Connected (bots=${n})`;
+    }
 
-        ws.onclose = () => {
-            status.textContent = 'Disconnected';
-        };
+    document.getElementById('startBots').addEventListener('click', startBots);
+    document.getElementById('stopBots').addEventListener('click', () => {
+      stopBots();
+      status.textContent = 'Connected (bots stopped)';
+    });
 
-        editor.addEventListener('input', () => {
-            const currentText = editor.value;
-            const diff = computeDiff(lastText, currentText);
-            ws.send(JSON.stringify({ type: 'edit', op: diff }));
-            lastText = currentText;
-            localChange = true;
+    document.getElementById('runBench').addEventListener('click', async () => {
+      const benchStatus = document.getElementById('benchStatus');
+      const benchBody = document.getElementById('benchBody');
+      benchStatus.textContent = 'Benchmark running...';
+      benchBody.innerHTML = '';
+
+      const algorithms = Array.from(document.querySelectorAll('.algo:checked')).map((el) => el.value);
+      const payload = {
+        algorithms,
+        clients: Number(document.getElementById('benchClients').value || 6),
+        opsPerClient: Number(document.getElementById('benchOps').value || 120),
+        delayMs: Number(document.getElementById('benchDelay').value || 10),
+      };
+
+      try {
+        const res = await fetch('/api/benchmark', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
         });
-    </script>
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Benchmark failed');
+
+        for (const r of data.result) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${r.algorithm}</td>
+            <td>${r.timeTakenToLoadAndMergeMs}</td>
+            <td>${r.ramUsageBytes}</td>
+            <td>${r.storageSizeBytes}</td>
+            <td>${r.converged ? 'yes' : 'no'}</td>
+          `;
+          benchBody.appendChild(tr);
+        }
+        benchStatus.textContent = `Done: ${data.result.length} algorithms`;
+      } catch (err) {
+        benchStatus.textContent = `Error: ${err.message}`;
+      }
+    });
+  </script>
 </body>
 </html>
