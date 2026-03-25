@@ -1,0 +1,23 @@
+{
+  "name": "collab-editor-bench",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bench": "ts-node src/benchmark/bench.ts",
+    "server": "node dist/server/server.js",
+    "start": "npm run bench"
+  },
+  "devDependencies": {
+    "@types/node": "^20.4.2",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  },
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "binary-search": "^1.0.0",
+    "priorityqueuejs": "^1.0.0",
+    "ws": "^8.20.0"
+  }
+}
